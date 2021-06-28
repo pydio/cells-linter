@@ -2,10 +2,12 @@ package zapslices
 
 import (
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/printer"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 )
@@ -35,9 +37,40 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			if !isSlice(pass, be.Args[1]) {
 				return true
 			}
+			oldExpr := render(pass.Fset, be)
+			// Replace zap.Any by zap.Int
+			be.Fun.(*ast.SelectorExpr).Sel = &ast.Ident{Name: "Int"}
+			// Replace "key" by "key length"
+			initialKey := strings.Trim(be.Args[0].(*ast.BasicLit).Value, "\"")
+			be.Args[0] = &ast.BasicLit{Kind: token.STRING, Value: "\"" + initialKey + " length\""}
 
-			pass.Reportf(be.Pos(), "zap.Any(slice) found %q",
-				render(pass.Fset, be))
+			// Replace slice argument by len(slice)
+			newArg := &ast.CallExpr{
+				Fun:  &ast.Ident{Name: "len"},
+				Args: []ast.Expr{be.Args[1]},
+			}
+			be.Args[1] = newArg
+			newExpr := render(pass.Fset, be)
+
+			//pass.Reportf(be.Pos(), "zap.Any(slice) found %q, should replace with %q", oldExpr, newExpr)
+
+			pass.Report(analysis.Diagnostic{
+				Pos:     be.Pos(),
+				Message: fmt.Sprintf("zap.Any(slice) found %q, can be replaced with %q", oldExpr, newExpr),
+				SuggestedFixes: []analysis.SuggestedFix{
+					{
+						Message: fmt.Sprintf("Fix : replace `%s` with `%s`", oldExpr, newExpr),
+						TextEdits: []analysis.TextEdit{
+							{
+								Pos:     be.Pos(),
+								End:     be.End(),
+								NewText: []byte(newExpr),
+							},
+						},
+					},
+				},
+			})
+
 			return true
 
 		})
